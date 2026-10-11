@@ -3,11 +3,10 @@
 
 import asyncio
 import json
-from pathlib import Path
 
 import httpx
-from mcp import ClientSession, StdioServerParameters
-from mcp.client.stdio import stdio_client
+from mcp import ClientSession
+from mcp.client.streamable_http import streamable_http_client
 from ollama import AsyncClient
 import os
 from dotenv import load_dotenv
@@ -18,10 +17,7 @@ ROUTER_MODEL = os.getenv("ROUTER_MODEL", "tev1:0.8b")
 OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS"))
 
-server_dir_value = os.getenv("SERVER_DIR")
-if not server_dir_value:
-    raise ValueError("SERVER_DIR is not set in .env")
-SERVER_DIR = Path(server_dir_value)
+SERVER_URL = os.getenv("SERVER_URL", "http://127.0.0.1:8000/mcp")
 
 ollama = AsyncClient()
 
@@ -189,20 +185,10 @@ async def ask_mcp(session: ClientSession, question: str) -> str:
 
 
 async def main():
-    if not SERVER_DIR.exists():
-        raise FileNotFoundError(f"MCP server project not found: {SERVER_DIR}")
-
-    # Run the server inside its own project/venv via uv.
-    server_parameters = StdioServerParameters(
-        command="uv",
-        args=["run", "--directory", str(SERVER_DIR), "mcphybridrag-server"],
-    )
-
     print(f"Using Ollama model: {MODEL} (tool router: {ROUTER_MODEL})")
-    print("Starting MCP server over stdio...")
+    print(f"Connecting to MCP server at {SERVER_URL} ...")
 
-    # The client launches the server and manages its lifecycle.
-    async with stdio_client(server_parameters) as (read, write):
+    async with streamable_http_client(SERVER_URL) as (read, write, _):
         async with ClientSession(read, write) as session:
             await session.initialize()
             print("Connected to MCP server.")

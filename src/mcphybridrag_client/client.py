@@ -8,11 +8,18 @@ from pathlib import Path
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from ollama import AsyncClient
+import os
+from dotenv import load_dotenv
 
-MODEL = "qwen2.5:3b"
-MAX_TOOL_ROUNDS = 5
+load_dotenv()
+MODEL = os.getenv("MODEL")
+MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS"))
 
-SERVER_DIR = Path("/home/abhisek-roy/Documents/Java/PYTHON_AI/MCPHybridRAG-Server")
+server_dir_value = os.getenv("SERVER_DIR")
+if not server_dir_value:
+    raise ValueError("SERVER_DIR is not set in .env")
+SERVER_DIR = Path(server_dir_value)
+
 ollama = AsyncClient()
 
 

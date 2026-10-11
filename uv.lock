@@ -343,12 +343,14 @@ source = { editable = "." }
 dependencies = [
     { name = "mcp", extra = ["cli"] },
     { name = "ollama" },
+    { name = "python-dotenv" },
 ]
 
 [package.metadata]
 requires-dist = [
     { name = "mcp", extras = ["cli"], specifier = ">=1.20,<2" },
     { name = "ollama", specifier = ">=0.6.3" },
+    { name = "python-dotenv", specifier = ">=1.2.4" },
 ]
 
 [[package]]

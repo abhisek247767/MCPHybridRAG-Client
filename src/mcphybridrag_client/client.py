@@ -5,6 +5,7 @@ import asyncio
 import json
 from pathlib import Path
 
+import httpx
 from mcp import ClientSession, StdioServerParameters
 from mcp.client.stdio import stdio_client
 from ollama import AsyncClient
@@ -13,6 +14,8 @@ from dotenv import load_dotenv
 
 load_dotenv()
 MODEL = os.getenv("MODEL")
+ROUTER_MODEL = os.getenv("ROUTER_MODEL", "tev1:0.8b")
+OLLAMA_HOST = os.getenv("OLLAMA_HOST", "http://localhost:11434")
 MAX_TOOL_ROUNDS = int(os.getenv("MAX_TOOL_ROUNDS"))
 
 server_dir_value = os.getenv("SERVER_DIR")
@@ -60,15 +63,64 @@ def get_text(result) -> str:
     return text
 
 
+async def select_tool(question: str, tools) -> str | None:
+    """Ask the router model which tool fits the question.
+
+    Returns a tool name, or None when no tool is needed.
+    tev1 is a classifier: it picks one option from a list via
+    Ollama's /v1/systemone endpoint (not a normal chat).
+    """
+    criteria = {
+        tool.name: (tool.description or tool.name).strip().splitlines()[0]
+        for tool in tools
+    }
+    criteria["none"] = "No tool is needed; answer directly."
+
+    payload = {
+        "model": ROUTER_MODEL,
+        "state": f"User question: {question}",
+        "questions": {
+            "tool": {
+                "type": "choice",
+                "instructions": "Which tool is needed to answer the user question?",
+                "criteria": criteria,
+            },
+            "sentiment": {
+                "type": "choice",
+                "instructions": "How positive is the user's message?",
+                "criteria": {
+                    "negative": "The message is unhappy or angry.",
+                    "neutral": "The message is neither positive nor negative.",
+                    "positive": "The message is happy or friendly.",
+                },
+            },
+        },
+    }
+
+    async with httpx.AsyncClient(timeout=60) as http:
+        response = await http.post(f"{OLLAMA_HOST}/v1/systemone", json=payload)
+        response.raise_for_status()
+    data = response.json()
+    answer = data["answers"]["tool"]
+    print(json.dumps(data, indent=2))
+
+    return None if answer["choice"] == "none" else answer["choice"]
+
+
 async def ask_mcp(session: ClientSession, question: str) -> str:
-    """Let the LLM choose and execute MCP tools."""
+    """Router model picks the tool; the main LLM does everything else."""
 
     discovered = await session.list_tools()
-    ollama_tools = convert_mcp_tools(discovered.tools)
 
-    print("\nAvailable MCP tools:")
-    for tool in discovered.tools:
-        print(f"  - {tool.name}: {tool.description or ''}")
+    try:
+        selected = await select_tool(question, discovered.tools)
+        allowed = [tool for tool in discovered.tools if tool.name == selected]
+    except Exception as exc:
+        print(f"\n[Router failed: {exc}] Giving all tools to {MODEL}.")
+        allowed = discovered.tools
+
+    ollama_tools = convert_mcp_tools(allowed)
+    allowed_names = {tool.name for tool in allowed}
 
     messages = [
         {
@@ -87,7 +139,7 @@ async def ask_mcp(session: ClientSession, question: str) -> str:
         response = await ollama.chat(
             model=MODEL,
             messages=messages,
-            tools=ollama_tools,
+            tools=ollama_tools or None,
         )
 
         message = response.message
@@ -106,9 +158,9 @@ async def ask_mcp(session: ClientSession, question: str) -> str:
             print(f"\n[LLM requested tool] {name}")
             print(f"[Arguments] {arguments}")
 
-            # Only execute tools discovered from this MCP server.
-            if name not in {tool.name for tool in discovered.tools}:
-                tool_result = f"Error: unknown tool {name!r}"
+            # Only execute the tool(s) the router allowed.
+            if name not in allowed_names:
+                tool_result = f"Error: tool {name!r} was not selected"
             else:
                 try:
                     result = await session.call_tool(
@@ -146,7 +198,7 @@ async def main():
         args=["run", "--directory", str(SERVER_DIR), "mcphybridrag-server"],
     )
 
-    print(f"Using Ollama model: {MODEL}")
+    print(f"Using Ollama model: {MODEL} (tool router: {ROUTER_MODEL})")
     print("Starting MCP server over stdio...")
 
     # The client launches the server and manages its lifecycle.

@@ -7,6 +7,7 @@ Run: uv run src/mcphybridrag_client/ocr_client.py
 import asyncio
 import json
 import mimetypes
+from datetime import date
 from pathlib import Path
 
 import httpx
@@ -182,6 +183,110 @@ async def select_tool(question: str, tools, has_document: bool = False) -> str |
     return None if answer["choice"] == "none" else answer["choice"]
 
 
+def document_message(document: dict) -> dict:
+    """System message that gives the LLM the OCR text."""
+    return {
+        "role": "system",
+        "content": (
+            f"The user attached a document ({document['name']}). "
+            "Answer from this extracted text only; if something is "
+            "not in it, say so.\n\n"
+            f"<document>\n{document['text']}\n</document>"
+        ),
+    }
+
+
+async def fill_arguments(
+    tool, question: str, document: dict | None, error: str | None = None
+) -> dict:
+    """Have the LLM fill the tool's arguments as JSON matching its schema.
+
+    Small models often ignore tools and just reply with text. Asking for
+    JSON in the exact schema (Ollama structured output) is far more reliable,
+    and works even for models without tool support.
+    """
+    if not tool.inputSchema.get("properties"):
+        return {}  # tool takes no arguments
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                f"Fill in the arguments for the tool {tool.name!r}.\n"
+                f"Tool description:\n{tool.description or ''}\n\n"
+                f"Today's date is {date.today().isoformat()}.\n"
+                "Reply with JSON only. Copy values exactly from the user's "
+                "question or the attached document. Convert dates to "
+                "YYYY-MM-DD and amounts to plain numbers (no currency "
+                "symbol). Use null for values that are not available."
+            ),
+        },
+        {"role": "user", "content": question},
+    ]
+    if document:
+        messages.insert(1, document_message(document))
+    if error:
+        messages.append(
+            {
+                "role": "user",
+                "content": f"The previous arguments were rejected: {error}\nFix them.",
+            }
+        )
+
+    response = await ollama.chat(
+        model=MODEL,
+        messages=messages,
+        format=tool.inputSchema,
+        options={"temperature": 0, "num_ctx": 8192},
+    )
+    arguments = json.loads(response.message.content or "{}")
+    # Drop nulls so the server uses its own defaults for optional arguments.
+    return {key: value for key, value in arguments.items() if value is not None}
+
+
+async def run_selected_tool(
+    session: ClientSession, tool, question: str, document: dict | None
+) -> str:
+    """Always call the tool the router picked, then answer from its result."""
+    error = None
+    for attempt in range(2):  # one retry if the server rejects the arguments
+        arguments = await fill_arguments(tool, question, document, error)
+        print(f"\n[Client calling tool] {tool.name}")
+        print(f"[Arguments] {arguments}")
+
+        result = await session.call_tool(tool.name, arguments=arguments)
+        tool_result = get_text(result)
+        print(f"[Tool result] {tool_result}")
+
+        if not result.isError:
+            break
+        error = tool_result
+
+    messages = [
+        {
+            "role": "system",
+            "content": (
+                "Answer the user's question using the tool result below. "
+                "The tool result is real data from the database: every "
+                "invoice in it is saved, and null only means that field was "
+                "not recorded. Mention every relevant invoice. Never add "
+                "amounts in different currencies together. "
+                "If the tool failed, say so plainly and explain why. "
+                "Never claim something happened unless the tool result shows it."
+            ),
+        },
+        {
+            "role": "user",
+            "content": (
+                f"Question: {question}\n\n"
+                f"Result from the {tool.name} tool:\n{tool_result}"
+            ),
+        },
+    ]
+    response = await ollama.chat(model=MODEL, messages=messages)
+    return (response.message.content or "").strip() or tool_result
+
+
 async def ask_mcp(
     session: ClientSession, question: str, document: dict | None = None
 ) -> str:
@@ -197,6 +302,11 @@ async def ask_mcp(
     except Exception as exc:
         print(f"\n[Router failed: {exc}] Giving all tools to {MODEL}.")
         allowed = discovered.tools
+    else:
+        # Router picked exactly one tool: call it ourselves, don't hope the
+        # LLM decides to. ("none" -> allowed is empty -> plain answer below.)
+        if allowed:
+            return await run_selected_tool(session, allowed[0], question, document)
 
     ollama_tools = convert_mcp_tools(allowed)
     allowed_names = {tool.name for tool in allowed}
@@ -208,7 +318,10 @@ async def ask_mcp(
                 "You are a helpful local assistant. "
                 "Use the available tools when calculations or the "
                 "current date/time are needed. Never invent tool results. "
-                "After receiving tool results, answer the user clearly."
+                "After receiving tool results, answer the user clearly.\n"
+                # Needed to turn "this month" / "next week" into real dates.
+                f"Today's date is {date.today().isoformat()}. "
+                "Always write dates as YYYY-MM-DD in tool arguments."
             ),
         },
         {"role": "user", "content": question},
@@ -216,18 +329,7 @@ async def ask_mcp(
 
     # Give the LLM the OCR text so it can answer questions about the document.
     if document:
-        messages.insert(
-            1,
-            {
-                "role": "system",
-                "content": (
-                    f"The user attached a document ({document['name']}). "
-                    "Answer from this extracted text only; if something is "
-                    "not in it, say so.\n\n"
-                    f"<document>\n{document['text']}\n</document>"
-                ),
-            },
-        )
+        messages.insert(1, document_message(document))
 
     for round_number in range(MAX_TOOL_ROUNDS):
         response = await ollama.chat(

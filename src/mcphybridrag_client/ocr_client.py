@@ -216,9 +216,12 @@ async def fill_arguments(
                 f"Tool description:\n{tool.description or ''}\n\n"
                 f"Today's date is {date.today().isoformat()}.\n"
                 "Reply with JSON only. Copy values exactly from the user's "
-                "question or the attached document. Convert dates to "
-                "YYYY-MM-DD and amounts to plain numbers (no currency "
-                "symbol). Use null for values that are not available."
+                "question or the attached document. Copy dates from the "
+                "document exactly as printed (e.g. 05/01/2026); the server "
+                "converts them. Only dates you work out yourself, like "
+                "'this month', should be written as YYYY-MM-DD. Write "
+                "amounts as plain numbers (no currency symbol). Use null "
+                "for values that are not available."
             ),
         },
         {"role": "user", "content": question},
